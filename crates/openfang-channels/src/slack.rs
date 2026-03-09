@@ -413,20 +413,30 @@ async fn parse_slack_event(
         ChannelContent::Text(text.to_string())
     };
 
+    // Slack channel prefixes: C=public, G=private/mpim, D=1:1 DM, W=org-wide.
+    // Only D channels are true DMs where dm_policy should apply.
+    let is_group = !channel.starts_with('D');
+
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "sender_user_id".to_string(),
+        serde_json::Value::String(user_id.to_string()),
+    );
+
     Some(ChannelMessage {
         channel: ChannelType::Slack,
         platform_message_id: ts.to_string(),
         sender: ChannelUser {
             platform_id: channel.to_string(),
-            display_name: user_id.to_string(), // Slack user IDs as display name
+            display_name: user_id.to_string(),
             openfang_user: None,
         },
         content,
         target_agent: None,
         timestamp,
-        is_group: true,
+        is_group,
         thread_id: None,
-        metadata: HashMap::new(),
+        metadata,
     })
 }
 
@@ -448,6 +458,11 @@ mod tests {
         let msg = parse_slack_event(&event, &bot_id, &[]).await.unwrap();
         assert_eq!(msg.channel, ChannelType::Slack);
         assert_eq!(msg.sender.platform_id, "C789");
+        assert_eq!(
+            msg.metadata.get("sender_user_id").and_then(|v| v.as_str()),
+            Some("U456")
+        );
+        assert!(msg.is_group);
         assert!(matches!(msg.content, ChannelContent::Text(ref t) if t == "Hello agent!"));
     }
 
@@ -559,7 +574,31 @@ mod tests {
         let msg = parse_slack_event(&event, &bot_id, &[]).await.unwrap();
         assert_eq!(msg.channel, ChannelType::Slack);
         assert_eq!(msg.sender.platform_id, "C789");
+        assert_eq!(
+            msg.metadata.get("sender_user_id").and_then(|v| v.as_str()),
+            Some("U456")
+        );
         assert!(matches!(msg.content, ChannelContent::Text(ref t) if t == "Edited message text"));
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_event_dm_detected() {
+        let bot_id = Arc::new(RwLock::new(Some("B123".to_string())));
+        let event = serde_json::json!({
+            "type": "message",
+            "user": "U456",
+            "channel": "D789",
+            "text": "Hello via DM",
+            "ts": "1700000000.000100"
+        });
+
+        let msg = parse_slack_event(&event, &bot_id, &[]).await.unwrap();
+        assert!(!msg.is_group);
+        assert_eq!(msg.sender.platform_id, "D789");
+        assert_eq!(
+            msg.metadata.get("sender_user_id").and_then(|v| v.as_str()),
+            Some("U456")
+        );
     }
 
     #[test]
