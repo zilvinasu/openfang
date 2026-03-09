@@ -337,6 +337,19 @@ fn channel_type_str(channel: &crate::types::ChannelType) -> &str {
     }
 }
 
+/// Extract the sender's user identity from a message.
+///
+/// Some adapters (e.g. Slack) set `platform_id` to the channel/conversation ID
+/// (needed for the send path) and store the actual user ID in metadata.
+/// This helper returns the user ID for RBAC and rate limiting.
+fn sender_user_id(message: &ChannelMessage) -> &str {
+    message
+        .metadata
+        .get("sender_user_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&message.sender.platform_id)
+}
+
 /// Send a response, applying output formatting and optional threading.
 async fn send_response(
     adapter: &dyn ChannelAdapter,
@@ -438,7 +451,7 @@ async fn dispatch_message(
     if let Some(ref ov) = overrides {
         if ov.rate_limit_per_user > 0 {
             if let Err(msg) =
-                rate_limiter.check(ct_str, &message.sender.platform_id, ov.rate_limit_per_user)
+                rate_limiter.check(ct_str, sender_user_id(message), ov.rate_limit_per_user)
             {
                 send_response(adapter, &message.sender, msg, thread_id, output_format).await;
                 return;
@@ -524,7 +537,7 @@ async fn dispatch_message(
         if !targets.is_empty() {
             // RBAC check applies to broadcast too
             if let Err(denied) = handle
-                .authorize_channel_user(ct_str, &message.sender.platform_id, "chat")
+                .authorize_channel_user(ct_str, sender_user_id(message), "chat")
                 .await
             {
                 send_response(
@@ -626,7 +639,7 @@ async fn dispatch_message(
 
     // RBAC: authorize the user before forwarding to agent
     if let Err(denied) = handle
-        .authorize_channel_user(ct_str, &message.sender.platform_id, "chat")
+        .authorize_channel_user(ct_str, sender_user_id(message), "chat")
         .await
     {
         send_response(
@@ -1123,5 +1136,50 @@ mod tests {
             channel_type_str(&ChannelType::Custom("irc".to_string())),
             "irc"
         );
+    }
+
+    #[test]
+    fn test_sender_user_id_from_metadata() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "sender_user_id".to_string(),
+            serde_json::Value::String("U456".to_string()),
+        );
+        let msg = ChannelMessage {
+            channel: ChannelType::Slack,
+            platform_message_id: "ts".to_string(),
+            sender: ChannelUser {
+                platform_id: "C789".to_string(),
+                display_name: "U456".to_string(),
+                openfang_user: None,
+            },
+            content: ChannelContent::Text("hi".to_string()),
+            target_agent: None,
+            timestamp: chrono::Utc::now(),
+            is_group: true,
+            thread_id: None,
+            metadata,
+        };
+        assert_eq!(sender_user_id(&msg), "U456");
+    }
+
+    #[test]
+    fn test_sender_user_id_fallback_to_platform_id() {
+        let msg = ChannelMessage {
+            channel: ChannelType::Telegram,
+            platform_message_id: "123".to_string(),
+            sender: ChannelUser {
+                platform_id: "chat123".to_string(),
+                display_name: "Alice".to_string(),
+                openfang_user: None,
+            },
+            content: ChannelContent::Text("hi".to_string()),
+            target_agent: None,
+            timestamp: chrono::Utc::now(),
+            is_group: true,
+            thread_id: None,
+            metadata: std::collections::HashMap::new(),
+        };
+        assert_eq!(sender_user_id(&msg), "chat123");
     }
 }
